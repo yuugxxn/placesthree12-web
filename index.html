@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PlacesThree12 — Система контроля и заведений</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            primary: { 50: '#eef2ff', 100: '#e0e7ff', 500: '#6366f1', 600: '#4f46e5', 700: '#4338ca' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    body { font-family: 'Inter', sans-serif; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors duration-200 min-h-screen flex flex-col">
+
+  <!-- ВЕРХНЯЯ ПАНЕЛЬ (показывается после входа) -->
+  <header id="app-header" class="hidden sticky top-0 z-30 bg-white/80 dark:bg-slate-900/80 backdrop-blur border-b border-slate-200 dark:border-slate-800">
+    <div class="max-w-4xl mx-auto px-4 h-16 flex items-center justify-between">
+      <div class="flex items-center gap-3 cursor-pointer" onclick="navigate('home')">
+        <div class="w-9 h-9 rounded-xl bg-primary-600 text-white flex items-center justify-center font-bold shadow-sm">P12</div>
+        <div>
+          <span class="font-semibold text-sm block leading-tight">PlacesThree12</span>
+          <span id="header-role-badge" class="text-xs text-primary-600 dark:text-primary-400 font-medium"></span>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="navigate('home')" class="px-3 py-1.5 text-sm rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800">Главная</button>
+        <button onclick="navigate('settings')" class="px-3 py-1.5 text-sm rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800">Настройки</button>
+        <button onclick="logout()" class="px-3 py-1.5 text-sm rounded-lg text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 font-medium">Выйти</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ОСНОВНОЙ КОНТЕЙНЕР -->
+  <main id="app-root" class="flex-1 max-w-4xl w-full mx-auto px-4 py-8 flex flex-col justify-center"></main>
+
+  <!-- МОДАЛЬНЫЕ ОКНА -->
+  <div id="modal-backdrop" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+    <div id="modal-box" class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-xl"></div>
+  </div>
+
+  <!-- TOAST УВЕДОМЛЕНИЯ -->
+  <div id="toast" class="fixed bottom-5 right-5 z-50 transform translate-y-20 opacity-0 transition-all duration-300 bg-slate-900 dark:bg-slate-800 text-white px-4 py-3 rounded-xl shadow-lg text-sm font-medium"></div>
+
+  <script>
+    // === СОСТОЯНИЕ И ДАННЫЕ ===
+    const PLACES_DATA = [
+      { id: 1, name: "Кофейня «Ботаника»", category: "Кофейня", rating: 4.9, address: "ул. Ленина, 14" },
+      { id: 2, name: "Технопарк «Квантум»", category: "Коворкинг", rating: 4.8, address: "пр. Мира, 88" },
+      { id: 3, name: "Бистро «Север»", category: "Ресторан", rating: 4.7, address: "Набережная, 5" },
+      { id: 4, name: "Библиотека №12", category: "Культура", rating: 4.9, address: "ул. Пушкина, 22" },
+      { id: 5, name: "Фитнес-клуб «Атлет»", category: "Спорт", rating: 4.6, address: "ул. Гагарина, 10" }
+    ];
+
+    let state = {
+      currentUser: null, // { userId, role, roleLabel }
+      isPinVerified: false,
+      theme: localStorage.getItem('p12_theme') || 'system',
+      favorites: JSON.parse(localStorage.getItem('p12_favs') || '[1, 2]'),
+      searchQuery: '',
+      onlyFavorites: false,
+      postsCache: null
+    };
+
+    // === УТИЛИТЫ ===
+    function showToast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.remove('translate-y-20', 'opacity-0');
+      setTimeout(() => el.classList.add('translate-y-20', 'opacity-0'), 3000);
+    }
+
+    function applyTheme() {
+      const root = document.documentElement;
+      const isDark = state.theme === 'dark' || (state.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      root.classList.toggle('dark', isDark);
+    }
+
+    function setTheme(mode) {
+      state.theme = mode;
+      localStorage.setItem('p12_theme', mode);
+      applyTheme();
+      navigate('settings');
+    }
+
+    function getRolePrefix(user) {
+      const u = user.toLowerCase();
+      if (u === 'admin') return 'admin';
+      if (u === 'guard') return 'guard';
+      return 'employee';
+    }
+
+    function logAuthAudit(event) {
+      const logs = JSON.parse(localStorage.getItem('p12_auth_audit') || '[]');
+      const ts = new Date().toLocaleString('ru-RU');
+      logs.unshift(`[${ts}] ${event}`);
+      localStorage.setItem('p12_auth_audit', JSON.stringify(logs));
+    }
+
+    function recordAccessAudit(userId, action, result, details) {
+      const logs = JSON.parse(localStorage.getItem('p12_access_audit') || '[]');
+      const ts = new Date().toLocaleString('ru-RU');
+      const status = result ? 'ALLOWED' : 'DENIED';
+      logs.unshift(`[${ts}] User: ${userId} | Action: ${action} | Result: ${status} | ${details}`);
+      localStorage.setItem('p12_access_audit', JSON.stringify(logs));
+    }
+
+    // === АВТОРИЗАЦИЯ И PIN ===
+    function handlePasswordLogin(e) {
+      e.preventDefault();
+      const user = document.getElementById('login-user').value.trim();
+      const pass = document.getElementById('login-pass').value;
+      if (!user) return showToast('Введите логин');
+
+      const uLower = user.toLowerCase();
+      let role = 'EMPLOYEE', roleLabel = 'Пользователь', expected = '24680';
+      if (uLower === 'admin') { role = 'ADMIN'; roleLabel = 'Администратор'; expected = '12345'; }
+      else if (uLower === 'guard') { role = 'SECURITY'; roleLabel = 'Охрана'; expected = '67890'; }
+
+      if (pass !== expected) {
+        logAuthAudit(`LOGIN_FAIL (password) for ${user}`);
+        return showToast('Неверный пароль для выбранной роли');
+      }
+
+      state.currentUser = { userId: user, role, roleLabel };
+      const savedPin = localStorage.getItem(`p12_pin_${getRolePrefix(user)}`);
+      if (!savedPin) {
+        state.isPinVerified = true;
+        logAuthAudit(`LOGIN_SUCCESS for ${user} (${role})`);
+        navigate('home');
+      } else {
+        state.isPinVerified = false;
+        renderPinScreen();
+      }
+    }
+
+    function handlePinSubmit(e) {
+      e.preventDefault();
+      const pin = document.getElementById('pin-input').value;
+      const prefix = getRolePrefix(state.currentUser.userId);
+      const savedPin = localStorage.getItem(`p12_pin_${prefix}`);
+      if (pin === savedPin) {
+        state.isPinVerified = true;
+        logAuthAudit(`PIN_SUCCESS for ${state.currentUser.userId}`);
+        navigate('home');
+      } else {
+        logAuthAudit(`PIN_FAIL for ${state.currentUser.userId}`);
+        showToast('Неверный PIN-код');
+      }
+    }
+
+    function logout() {
+      if (state.currentUser) logAuthAudit(`LOGOUT ${state.currentUser.userId}`);
+      state.currentUser = null;
+      state.isPinVerified = false;
+      document.getElementById('app-header').classList.add('hidden');
+      renderLoginScreen();
+    }
+
+    // === НАВИГАЦИЯ И ЭКРАНЫ ===
+    function navigate(screen) {
+      if (!state.currentUser) return renderLoginScreen();
+      if (!state.isPinVerified) return renderPinScreen();
+
+      document.getElementById('app-header').classList.remove('hidden');
+      document.getElementById('header-role-badge').textContent = `${state.currentUser.userId} · ${state.currentUser.roleLabel}`;
+
+      const root = document.getElementById('app-root');
+      root.classList.remove('justify-center');
+
+      if (screen === 'home') renderHomeScreen(root);
+      else if (screen === 'list') renderListScreen(root);
+      else if (screen === 'posts') renderPostsScreen(root);
+      else if (screen === 'settings') renderSettingsScreen(root);
+      else if (screen === 'pass') renderPassScreen(root);
+      else if (screen === 'scan') renderScanScreen(root);
+      else if (screen === 'admin') renderAdminScreen(root);
+      else if (screen === 'security_lab') renderSecurityLabScreen(root);
+    }
+
+    function renderLoginScreen() {
+      const root = document.getElementById('app-root');
+      root.classList.add('justify-center');
+      root.innerHTML = `
+        <div class="max-w-md w-full mx-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-8 shadow-sm">
+          <div class="w-12 h-12 rounded-2xl bg-primary-600 text-white flex items-center justify-center font-bold text-lg mb-5">P12</div>
+          <h1 class="text-2xl font-bold mb-1">Вход в систему</h1>
+          <p class="text-sm text-slate-500 dark:text-slate-400 mb-6">Используйте учётные данные вашей роли</p>
+          <form onsubmit="handlePasswordLogin(event)" class="space-y-4">
+            <div>
+              <label class="block text-sm font-medium mb-1">Логин</label>
+              <input id="login-user" type="text" placeholder="admin, guard или Иван" required
+                class="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent focus:ring-2 focus:ring-primary-500 outline-none" />
+            </div>
+            <div>
+              <label class="block text-sm font-medium mb-1">Пароль</label>
+              <input id="login-pass" type="password" placeholder="•••••" required
+                class="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent focus:ring-2 focus:ring-primary-500 outline-none" />
+            </div>
+            <button type="submit" class="w-full py-3 rounded-xl bg-primary-600 hover:bg-primary-700 text-white font-semibold transition">Войти</button>
+          </form>
+          <div class="mt-6 pt-5 border-t border-slate-100 dark:border-slate-800 text-xs text-slate-500 space-y-1">
+            <div><strong class="text-slate-700 dark:text-slate-300">Администратор:</strong> admin / 12345</div>
+            <div><strong class="text-slate-700 dark:text-slate-300">Охрана:</strong> guard / 67890</div>
+            <div><strong class="text-slate-700 dark:text-slate-300">Сотрудник:</strong> Иван / 24680</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderPinScreen() {
+      const root = document.getElementById('app-root');
+      root.classList.add('justify-center');
+      root.innerHTML = `
+        <div class="max-w-sm w-full mx-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-8 shadow-sm text-center">
+          <h2 class="text-xl font-bold mb-2">Введите PIN-код</h2>
+          <p class="text-sm text-slate-500 mb-6">Пользователь: <strong>${state.currentUser.userId}</strong></p>
+          <form onsubmit="handlePinSubmit(event)" class="space-y-4">
+            <input id="pin-input" type="password" maxlength="4" pattern="\\d{4}" placeholder="••••" required
+              class="w-full text-center tracking-[1em] text-2xl font-bold py-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent outline-none focus:ring-2 focus:ring-primary-500" />
+            <button type="submit" class="w-full py-3 rounded-xl bg-primary-600 hover:bg-primary-700 text-white font-semibold">Подтвердить</button>
+          </form>
+          <button onclick="logout()" class="mt-4 text-sm text-slate-500 hover:text-slate-700">Сменить пользователя</button>
+        </div>
+      `;
+    }
+
+    // 1. ГЛАВНЫЙ ЭКРАН (Только 3 основных раздела + выход)
+    function renderHomeScreen(root) {
+      root.innerHTML = `
+        <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 sm:p-8 mb-6 shadow-sm">
+          <span class="inline-block px-3 py-1 rounded-full text-xs font-semibold bg-primary-50 text-primary-700 dark:bg-primary-500/10 dark:text-primary-400 mb-3">
+            Роль: ${state.currentUser.roleLabel} (${state.currentUser.role})
+          </span>
+          <h1 class="text-2xl sm:text-3xl font-bold mb-2">Добро пожаловать, ${state.currentUser.userId}!</h1>
+          <p class="text-slate-500 dark:text-slate-400 text-sm">Выберите раздел для работы. Служебные инструменты вашей роли доступны в настройках.</p>
+        </div>
+
+        <div class="grid sm:grid-cols-3 gap-4">
+          <button onclick="navigate('list')" class="text-left p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-primary-500 transition shadow-sm group">
+            <div class="w-10 h-10 rounded-xl bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 flex items-center justify-center text-xl mb-4">📍</div>
+            <h3 class="font-bold text-lg mb-1 group-hover:text-primary-600">Список заведений</h3>
+            <p class="text-sm text-slate-500">Поиск мест, категории и избранное</p>
+          </button>
+
+          <button onclick="navigate('posts')" class="text-left p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-primary-500 transition shadow-sm group">
+            <div class="w-10 h-10 rounded-xl bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 flex items-center justify-center text-xl mb-4">🌐</div>
+            <h3 class="font-bold text-lg mb-1 group-hover:text-primary-600">Обзор (Посты API)</h3>
+            <p class="text-sm text-slate-500">Загрузка данных с внешнего сервера</p>
+          </button>
+
+          <button onclick="navigate('settings')" class="text-left p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-primary-500 transition shadow-sm group">
+            <div class="w-10 h-10 rounded-xl bg-amber-50 dark:bg-amber-500/10 text-amber-600 flex items-center justify-center text-xl mb-4">⚙️</div>
+            <h3 class="font-bold text-lg mb-1 group-hover:text-primary-600">Настройки</h3>
+            <p class="text-sm text-slate-500">Тема, безопасность, пропуск и роли</p>
+          </button>
+        </div>
+      `;
+    }
+
+    // 2. СПИСОК ЗАВЕДЕНИЙ
+    function toggleFav(id) {
+      if (state.favorites.includes(id)) state.favorites = state.favorites.filter(x => x !== id);
+      else state.favorites.push(id);
+      localStorage.setItem('p12_favs', JSON.stringify(state.favorites));
+      renderListScreen(document.getElementById('app-root'));
+    }
+
+    function renderListScreen(root) {
+      const filtered = PLACES_DATA.filter(p => {
+        const matchQ = p.name.toLowerCase().includes(state.searchQuery.toLowerCase()) || p.category.toLowerCase().includes(state.searchQuery.toLowerCase());
+        const matchFav = state.onlyFavorites ? state.favorites.includes(p.id) : true;
+        return matchQ && matchFav;
+      });
+
+      root.innerHTML = `
+        <div class="flex items-center justify-between mb-6">
+          <h2 class="text-2xl font-bold">Список заведений</h2>
+          <button onclick="navigate('home')" class="text-sm text-primary-600 font-medium">← На главную</button>
+        </div>
+
+        <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 mb-6 space-y-4">
+          <input type="text" value="${state.searchQuery}" oninput="state.searchQuery=this.value; renderListScreen(document.getElementById('app-root'))"
+            placeholder="Поиск по названию или категории..."
+            class="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent outline-none focus:ring-2 focus:ring-primary-500" />
+          <div class="flex items-center justify-between">
+            <label class="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="checkbox" ${state.onlyFavorites ? 'checked' : ''} onchange="state.onlyFavorites=this.checked; renderListScreen(document.getElementById('app-root'))" class="rounded text-primary-600" />
+              Только избранное
+            </label>
+            <span class="text-xs text-slate-500">Найдено: ${filtered.length}</span>
+          </div>
+        </div>
+
+        <div class="space-y-3">
+          ${filtered.map(p => {
+            const isFav = state.favorites.includes(p.id);
+            return `
+              <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 flex items-center justify-between">
+                <div>
+                  <div class="flex items-center gap-2 mb-1">
+                    <span class="text-xs font-medium px-2.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800">${p.category}</span>
+                    <span class="text-xs text-amber-500 font-semibold">★ ${p.rating}</span>
+                  </div>
+                  <h3 class="font-bold text-lg">${p.name}</h3>
+                  <p class="text-sm text-slate-500">${p.address}</p>
+                </div>
+                <button onclick="toggleFav(${p.id})" class="p-3 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-lg">
+                  ${isFav ? '❤️' : '🤍'}
+                </button>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+
+    // 3. ОБЗОР (ПОСТЫ API)
+    async function renderPostsScreen(root) {
+      root.innerHTML = `
+        <div class="flex items-center justify-between mb-6">
+          <h2 class="text-2xl font-bold">Обзор (Посты API)</h2>
+          <button onclick="navigate('home')" class="text-sm text-primary-600 font-medium">← На главную</button>
+        </div>
+        <div id="posts-container" class="text-center py-12 text-slate-500">Загрузка данных с сервера...</div>
+      `;
+
+      try {
+        if (!state.postsCache) {
+          const res = await fetch('https://jsonplaceholder.typicode.com/posts?_limit=10');
+          state.postsCache = await res.json();
+        }
+        document.getElementById('posts-container').className = 'space-y-3 text-left';
+        document.getElementById('posts-container').innerHTML = state.postsCache.map(post => `
+          <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5">
+            <span class="text-xs font-mono text-primary-600">#${post.id}</span>
+            <h3 class="font-bold text-base capitalize mt-1 mb-2">${post.title}</h3>
+            <p class="text-sm text-slate-500 dark:text-slate-400">${post.body}</p>
+          </div>
+        `).join('');
+      } catch (err) {
+        document.getElementById('posts-container').innerHTML = `<div class="text-rose-500">Ошибка загрузки: ${err.message}</div>`;
+      }
+    }
+
+    // 4. НАСТРОЙКИ (С РОЛЕВЫМИ ФУНКЦИЯМИ)
+    function renderSettingsScreen(root) {
+      const role = state.currentUser.role;
+      const prefix = getRolePrefix(state.currentUser.userId);
+      const hasPin = !!localStorage.getItem(`p12_pin_${prefix}`);
+
+      root.innerHTML = `
+        <div class="flex items-center justify-between mb-6">
+          <h2 class="text-2xl font-bold">Настройки</h2>
+          <button onclick="navigate('home')" class="text-sm text-primary-600 font-medium">← На главную</button>
+        </div>
+
+        <div class="space-y-6">
+          <!-- Тема -->
+          <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6">
+            <h3 class="font-bold text-lg mb-4">Оформление</h3>
+            <div class="grid grid-cols-3 gap-2">
+              ${['system', 'light', 'dark'].map(m => `
+                <button onclick="setTheme('${m}')" class="py-2.5 rounded-xl text-sm font-medium border ${state.theme === m ? 'bg-primary-600 text-white border-primary-600' : 'border-slate-200 dark:border-slate-700'}">
+                  ${m === 'system' ? 'Системная' : m === 'light' ? 'Светлая' : 'Тёмная'}
+                </button>
+              `).join('')}
+            </div>
+          </div>
+
+          <!-- Служебные функции по ролям -->
+          <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6">
+            <h3 class="font-bold text-lg mb-1">${role === 'EMPLOYEE' ? 'Мои данные' : 'Служебные функции'}</h3>
+            <p class="text-xs text-slate-500 mb-4">Доступные инструменты для роли ${state.currentUser.roleLabel}</p>
+            <div class="space-y-2.5">
+              <button onclick="navigate('pass')" class="w-full py-3 px-4 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 font-medium text-left flex justify-between items-center">
+                <span>🪪 Мой пропуск</span><span class="text-slate-400">→</span>
+              </button>
+
+              ${role === 'SECURITY' ? `
+                <button onclick="navigate('scan')" class="w-full py-3 px-4 rounded-xl bg-indigo-50 dark:bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 font-medium text-left flex justify-between items-center">
+                  <span>📷 Сканер пропусков</span><span>→</span>
+                </button>
+              ` : ''}
+
+              ${role === 'ADMIN' ? `
+                <button onclick="navigate('admin')" class="w-full py-3 px-4 rounded-xl bg-indigo-50 dark:bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 font-medium text-left flex justify-between items-center">
+                  <span>📋 Журнал доступа (Audit)</span><span>→</span>
+                </button>
+              ` : ''}
+
+              <button onclick="navigate('security_lab')" class="w-full py-3 px-4 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 hover:border-primary-500 font-medium text-left flex justify-between items-center text-sm">
+                <span>🛡️ Тесты сетевой безопасности (Лаб. 15)</span><span class="text-primary-600">Запустить →</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Безопасность аккаунта -->
+          <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 space-y-3">
+            <h3 class="font-bold text-lg">Безопасность</h3>
+            <button onclick="openPinModal()" class="w-full py-2.5 px-4 rounded-xl bg-slate-100 dark:bg-slate-800 font-medium text-sm">
+              ${hasPin ? 'Изменить персональный PIN-код' : 'Установить персональный PIN-код'}
+            </button>
+            <button onclick="openAuthLogModal()" class="w-full py-2.5 px-4 rounded-xl border border-slate-200 dark:border-slate-700 font-medium text-sm">
+              Посмотреть журнал входов
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    // 5. ЭКРАНЫ ПРОПУСКА, СКАНЕРА И ЖУРНАЛА
+    function renderPassScreen(root) {
+      root.innerHTML = `
+        <div class="max-w-md mx-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-8 text-center">
+          <h2 class="text-2xl font-bold mb-2">Мобильный пропуск</h2>
+          <p class="text-sm text-slate-500 mb-6">${state.currentUser.userId} (${state.currentUser.roleLabel})</p>
+          <div class="w-48 h-48 mx-auto rounded-2xl bg-slate-100 dark:bg-slate-800 border-2 border-dashed border-primary-500 flex flex-col items-center justify-center p-4 mb-6">
+            <div class="text-4xl mb-2">🏁</div>
+            <span class="font-mono text-xs break-all">PASS-${state.currentUser.role}-${state.currentUser.userId.toUpperCase()}</span>
+          </div>
+          <button onclick="navigate('settings')" class="w-full py-3 rounded-xl bg-primary-600 text-white font-semibold">Вернуться в настройки</button>
+        </div>
+      `;
+    }
+
+    function renderScanScreen(root) {
+      if (state.currentUser.role !== 'SECURITY' && state.currentUser.role !== 'ADMIN') {
+        root.innerHTML = `<div class="text-center text-rose-500 font-bold">У вас нет прав доступа к сканеру.</div>`;
+        return;
+      }
+      root.innerHTML = `
+        <div class="max-w-md mx-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-8 text-center">
+          <h2 class="text-2xl font-bold mb-2">Сканирование пропусков</h2>
+          <p class="text-sm text-slate-500 mb-6">Имитация проверки пропуска с записью в audit.log</p>
+          <button onclick="executeScan()" class="w-full py-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold mb-3">
+            Сканировать пропуск
+          </button>
+          <button onclick="navigate('settings')" class="w-full py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-sm">Назад</button>
+        </div>
+      `;
+    }
+
+    function executeScan() {
+      recordAccessAudit(state.currentUser.userId, 'SCAN_PASS', true, 'Пропуск успешно проверен (Web)');
+      showToast('Пропуск проверен! Запись добавлена в журнал.');
+    }
+
+    function renderAdminScreen(root) {
+      const logs = JSON.parse(localStorage.getItem('p12_access_audit') || '[]');
+      root.innerHTML = `
+        <div class="flex items-center justify-between mb-6">
+          <h2 class="text-2xl font-bold">Журнал доступа (ADMIN)</h2>
+          <button onclick="navigate('settings')" class="text-sm text-primary-600 font-medium">← В настройки</button>
+        </div>
+        <div class="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 space-y-3">
+          ${logs.length ? logs.map(l => `<div class="font-mono text-xs p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60">${l}</div>`).join('')
+            : '<p class="text-sm text-slate-500">Журнал пока пуст. Выполните сканирование под учётной записью guard.</p>'}
+        </div>
+      `;
+    }
+
+    // 6. ТЕСТЫ ЛАБОРАТОРНОЙ 15 (HMAC, NONCE, WEBSOCKET)
+    async function renderSecurityLabScreen(root) {
+      root.innerHTML = `
+        <div class="flex items-center justify-between mb-6">
+          <h2 class="text-2xl font-bold">SecurityLabTest (Лаб. 15)</h2>
+          <button onclick="navigate('settings')" class="text-sm text-primary-600 font-medium">← В настройки</button>
+        </div>
+        <div id="lab-console" class="bg-slate-900 text-emerald-400 font-mono text-xs p-6 rounded-2xl space-y-2 overflow-x-auto leading-relaxed">
+          <div>=== НАЧАЛО ТЕСТИРОВАНИЯ БЕЗОПАСНОСТИ ===</div>
+        </div>
+      `;
+      const logLine = (txt) => {
+        const el = document.getElementById('lab-console');
+        if (el) el.innerHTML += `<div>${txt}</div>`;
+      };
+
+      // 1. HMAC-SHA256 через Web Crypto API
+      const enc = new TextEncoder();
+      const key = await crypto.subtle.importKey('raw', enc.encode('secret'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+      const canonical = `POST\n/api/v1/data\nsha256_body_hash\n1700000000\n123e4567-e89b-12d3-a456-426614174000`;
+      const sigBuf = await crypto.subtle.sign('HMAC', key, enc.encode(canonical));
+      const sigHex = Array.from(new Uint8Array(sigBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+      logLine(`1. HMAC-Подпись: ${sigHex}`);
+
+      // 2. NonceCache (защита от replay)
+      const seen = new Set();
+      const checkNonce = (n, ts) => (Math.abs(Math.floor(Date.now()/1000) - ts) <= 60) && !seen.has(n) && !!seen.add(n);
+      const now = Math.floor(Date.now() / 1000);
+      logLine(`2. Nonce-кэш: первая попытка = ${checkNonce('nonce_123', now)}, повтор = ${checkNonce('nonce_123', now)}, старый ts = ${checkNonce('nonce_456', now - 100)}`);
+
+      // 3. Проверка HTTPS API
+      try {
+        const r = await fetch('https://jsonplaceholder.typicode.com/posts?_limit=5');
+        const data = await r.json();
+        logLine(`3. Защищённый HTTPS-запрос: Успех! Получено записей: ${data.length}`);
+      } catch (e) {
+        logLine(`3. Ошибка сети: ${e.message}`);
+      }
+    }
+
+    // === МОДАЛЬНЫЕ ОКНА ДЛЯ PIN И ЛОГОВ ===
+    function closeModal() { document.getElementById('modal-backdrop').classList.add('hidden'); }
+
+    function openPinModal() {
+      const box = document.getElementById('modal-box');
+      box.innerHTML = `
+        <h3 class="text-lg font-bold mb-2">Новый PIN-код (4 цифры)</h3>
+        <input id="new-pin-val" type="password" maxlength="4" placeholder="1234" class="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-transparent mb-4" />
+        <div class="flex justify-end gap-2">
+          <button onclick="closeModal()" class="px-4 py-2 text-sm text-slate-500">Отмена</button>
+          <button onclick="saveNewPin()" class="px-4 py-2 text-sm rounded-xl bg-primary-600 text-white font-medium">Сохранить</button>
+        </div>
+      `;
+      document.getElementById('modal-backdrop').classList.remove('hidden');
+    }
+
+    function saveNewPin() {
+      const val = document.getElementById('new-pin-val').value;
+      if (!/^\d{4}$/.test(val)) return showToast('Введите ровно 4 цифры');
+      const prefix = getRolePrefix(state.currentUser.userId);
+      localStorage.setItem(`p12_pin_${prefix}`, val);
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      const recovery = Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+      logAuthAudit(`PIN_SET for ${state.currentUser.userId}`);
+      document.getElementById('modal-box').innerHTML = `
+        <h3 class="text-lg font-bold mb-2">PIN сохранён!</h3>
+        <p class="text-sm text-slate-500 mb-3">Ваш одноразовый код восстановления:</p>
+        <div class="p-3 rounded-xl bg-slate-100 dark:bg-slate-800 font-mono text-xl font-bold text-center text-primary-600 mb-4">${recovery}</div>
+        <button onclick="closeModal(); navigate('settings')" class="w-full py-2.5 rounded-xl bg-primary-600 text-white font-medium">Я сохранил</button>
+      `;
+    }
+
+    function openAuthLogModal() {
+      const logs = JSON.parse(localStorage.getItem('p12_auth_audit') || '[]');
+      document.getElementById('modal-box').innerHTML = `
+        <h3 class="text-lg font-bold mb-3">Журнал событий входа</h3>
+        <div class="max-h-60 overflow-y-auto space-y-1.5 text-xs font-mono mb-4">
+          ${logs.length ? logs.map(l => `<div class="p-2 rounded bg-slate-100 dark:bg-slate-800">${l}</div>`).join('') : 'Журнал пуст'}
+        </div>
+        <button onclick="closeModal()" class="w-full py-2 rounded-xl bg-primary-600 text-white text-sm font-medium">Закрыть</button>
+      `;
+      document.getElementById('modal-backdrop').classList.remove('hidden');
+    }
+
+    // Инициализация
+    applyTheme();
+    renderLoginScreen();
+  </script>
+</body>
+</html>
